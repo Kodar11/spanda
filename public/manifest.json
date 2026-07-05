@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "spanda - a background music extension",
+  "version": "0.0.1",
+  "description": "Automatically pause and resume background music tabs while you browse.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "assets/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_title": "spanda"
+  },
+  "options_page": "options/index.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["assets/content.js"],
+      "run_at": "document_idle",
+      "type": "module"
+    }
+  ]
+}
