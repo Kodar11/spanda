@@ -20,11 +20,22 @@ Spandan is a calm, minimal browser extension that intelligently pauses and resum
 
 ## Screenshots
 
-> Placeholder sections — replace with real screenshots before publishing.
+<div align="center">
 
-| Popup | Settings |
-|---|---|
-| ![Popup](docs/popup.png) | ![Settings](docs/settings.png) |
+  <p><em>Spandan keeps your focus flow uninterrupted.</em></p>
+
+  <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 24px; margin-top: 16px;">
+    <figure style="margin: 0;">
+      <img src="docs/popup.png" alt="Spandan popup" width="280" style="border-radius: 14px; border: 1px solid rgba(148, 163, 184, 0.15); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);">
+      <figcaption style="margin-top: 10px; font-size: 13px; color: #94a3b8;">Popup — at-a-glance status & quick controls</figcaption>
+    </figure>
+    <figure style="margin: 0;">
+      <img src="docs/settings.png" alt="Spandan settings" width="560" style="border-radius: 14px; border: 1px solid rgba(148, 163, 184, 0.15); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);">
+      <figcaption style="margin-top: 10px; font-size: 13px; color: #94a3b8;">Settings — fine-tune playback, fades & whitelist</figcaption>
+    </figure>
+  </div>
+
+</div>
 
 ---
 
@@ -40,12 +51,6 @@ Spandan is a calm, minimal browser extension that intelligently pauses and resum
 | **Website Whitelist** | Only specific websites can pause your music. Leave empty to allow all. |
 | **Persistent Settings** | Your preferences are saved across browser sessions. |
 | **Lightweight Architecture** | Built with Manifest V3, React, TypeScript, and Tailwind CSS. |
-
----
-
-## Demo
-
-> Placeholder for a short GIF or screen recording showing Spandan in action.
 
 ---
 
