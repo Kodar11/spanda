@@ -46,6 +46,91 @@ export function getUrlKey(url: string): string {
 }
 
 /**
+ * Extract the hostname from a URL, or return undefined if the URL is invalid.
+ */
+export function getHostname(url: string | undefined): string | undefined {
+  if (!url) return undefined
+  try {
+    return new URL(url).hostname
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Normalize a whitelist entry to a hostname.
+ *
+ * Users may enter "youtube.com", "https://www.youtube.com/", or
+ * "www.youtube.com". This strips protocols and paths.
+ */
+function normalizeWhitelistEntry(entry: string): string {
+  const trimmed = entry.trim().toLowerCase()
+  if (!trimmed) return ''
+
+  // If it looks like a bare hostname, return it as-is.
+  if (!trimmed.includes('/')) {
+    return trimmed.replace(/^www\./, '')
+  }
+
+  try {
+    return new URL(trimmed).hostname.replace(/^www\./, '')
+  } catch {
+    return trimmed.replace(/^www\./, '')
+  }
+}
+
+/**
+ * Returns true if the URL matches the whitelist.
+ *
+ * An empty whitelist means "allow all websites".
+ */
+export function matchesWhitelist(
+  url: string | undefined,
+  whitelist: string[],
+): boolean {
+  if (whitelist.length === 0) return true
+
+  const hostname = getHostname(url)
+  if (!hostname) return false
+
+  const normalizedHost = hostname.toLowerCase()
+  const normalizedEntries = whitelist.map(normalizeWhitelistEntry).filter(Boolean)
+
+  return normalizedEntries.some((entry) => {
+    // Exact match: "youtube.com" matches "youtube.com".
+    if (normalizedHost === entry) return true
+
+    // Subdomain match: "youtube.com" matches "www.youtube.com" and
+    // "music.youtube.com".
+    if (normalizedHost.endsWith(`.${entry}`)) return true
+
+    return false
+  })
+}
+
+/**
+ * Returns a user-facing site name for a URL.
+ *
+ * Prefers the tab title when available, otherwise derives a readable name from
+ * the hostname.
+ */
+export function getSiteName(
+  url: string | undefined,
+  title?: string,
+): string {
+  if (title) {
+    // YouTube titles end with " - YouTube"; strip that for a cleaner label.
+    const cleaned = title.replace(/\s*[-|]\s*YouTube\s*$/i, '').trim()
+    if (cleaned) return cleaned
+  }
+
+  const hostname = getHostname(url)
+  if (!hostname) return 'Unknown site'
+
+  return hostname.replace(/^www\./, '')
+}
+
+/**
  * Query all tabs that are currently producing audio.
  */
 export async function queryAudibleTabs(): Promise<chrome.tabs.Tab[]> {

@@ -1,5 +1,5 @@
 /**
- * Shared TypeScript types for the spanda extension.
+ * Shared TypeScript types for the spandan extension.
  *
  * These types are used by the popup, options page, background service worker,
  * and content script so every part of the extension agrees on the shape of
@@ -19,11 +19,18 @@ export interface MusicTab {
 }
 
 /**
+ * High-level playback status reported to the popup.
+ */
+export type PlaybackStatus =
+  | 'disabled'
+  | 'no_music_tab'
+  | 'playing'
+  | 'paused'
+  | 'waiting'
+  | 'manual_pause'
+
+/**
  * User-configurable settings persisted in chrome.storage.local.
- *
- * Phase 2 reads `enabled` to decide whether to auto-pause/resume.
- * `resumeDelayMs` and `fadeDurationMs` are wired into storage but intentionally
- * not used yet (they are reserved for Phase 3).
  */
 export interface ExtensionSettings {
   /** Master on/off switch for the extension. */
@@ -31,19 +38,18 @@ export interface ExtensionSettings {
 
   /**
    * How long to wait (in milliseconds) before resuming the music tab after the
-   * foreground tab stops producing audio.
+   * foreground tab stops producing audio. Allowed range: 2000–10000 ms.
    */
   resumeDelayMs: number
 
   /**
    * How long a fade in/out should last (in milliseconds).
-   * Phase 3 will use this to smoothly adjust media volume.
    */
   fadeDurationMs: number
 
   /**
-   * URL patterns where the extension is allowed to run.
-   * An empty array means "all URLs".
+   * Hostnames that are allowed to pause the music tab (e.g., "youtube.com",
+   * "udemy.com"). An empty array means "all websites".
    */
   whitelist: string[]
 }
@@ -58,8 +64,31 @@ export interface ExtensionState {
   /** The tab the user has designated as the background music tab. */
   musicTab: MusicTab | null
 
-  /** Whether the music tab is believed to be playing. */
+  /**
+   * Cached playback state used for UI only. The actual video element is the
+   * source of truth; this value is updated after successful commands.
+   */
   isPlaying: boolean
+
+  /**
+   * Set to true when the user manually pauses or mutes the music tab. The
+   * extension will not auto-resume until the user manually plays/unmutes.
+   */
+  manuallyPaused: boolean
+
+  /**
+   * Timestamp (ms since epoch) when the music tab is scheduled to resume. Null
+   * when no resume timer is active.
+   */
+  waitingToResumeUntil: number | null
+}
+
+/**
+ * Aggregate state of the video element(s) reported by the content script.
+ */
+export interface VideoStatus {
+  isPlaying: boolean
+  isMuted: boolean
 }
 
 /**
@@ -71,8 +100,21 @@ export type ExtensionMessage =
   | { type: 'SET_MUSIC_TAB'; payload: MusicTab }
   | { type: 'PLAY' }
   | { type: 'PAUSE' }
+  | {
+      type: 'FADE_IN_PLAY'
+      payload: { durationMs: number }
+    }
+  | {
+      type: 'FADE_OUT_PAUSE'
+      payload: { durationMs: number }
+    }
   | { type: 'GET_VIDEO_STATUS' }
   | { type: 'CONTENT_READY' }
+  | { type: 'USER_PAUSED' }
+  | { type: 'USER_PLAYED' }
+  | { type: 'USER_MUTED' }
+  | { type: 'USER_UNMUTED' }
+  | { type: 'USER_STATE_CHANGED'; payload: VideoStatus }
 
 /**
  * Response shape returned by the background service worker and content script
@@ -81,4 +123,15 @@ export type ExtensionMessage =
 export interface ExtensionResponse {
   ok: boolean
   payload?: unknown
+}
+
+/**
+ * Status payload returned by GET_STATUS.
+ */
+export interface StatusPayload {
+  enabled: boolean
+  musicTab: MusicTab | null
+  status: PlaybackStatus
+  reason: string
+  waitingSeconds: number | null
 }

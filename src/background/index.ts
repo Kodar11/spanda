@@ -6,31 +6,35 @@ import {
   setState,
 } from '@/lib/storage'
 import {
+  cancelResumeTimer,
+  scheduleResumeTimer,
+} from '@/lib/timers'
+import { getComputedStatus, getWhitelistedNonMusicTabs } from '@/lib/status'
+import {
   findTabByUrl,
   isMusicTab,
   isYouTubeUrl,
   queryAudibleTabs,
 } from '@/lib/tabs'
+import { queryVideoStatus } from '@/lib/video'
 import type {
   ExtensionMessage,
   ExtensionResponse,
   ExtensionSettings,
   MusicTab,
+  VideoStatus,
 } from '@/types'
 
 /**
- * Background service worker for spanda.
+ * Background service worker for spandan.
  *
  * Responsibilities:
- * - Restore the saved music tab after browser restart (by URL matching).
- * - Listen for audible-tab changes via chrome.tabs.onUpdated/onRemoved.
- * - Decide when to pause/resume the music tab based on other audible tabs.
- * - Route messages from the popup and content scripts.
- *
- * Phase 3 additions will be:
- * - resumeDelayMs handling (delay before resuming)
- * - fadeDurationMs handling (fade volume before play/pause)
- * - user-initiated pause/mute detection
+ * - Restore the saved music tab after browser restart.
+ * - Listen for audible-tab changes and pause/resume the music tab.
+ * - Respect user-initiated pause/mute and manual-pause state.
+ * - Apply resume delays and fade durations from settings.
+ * - Enforce the website whitelist.
+ * - Report rich status to the popup.
  */
 
 // ---------------------------------------------------------------------------
@@ -38,34 +42,31 @@ import type {
 // ---------------------------------------------------------------------------
 
 chrome.runtime.onInstalled.addListener(async () => {
-  console.log('[spanda] extension installed')
+  console.log('[spandan] extension installed')
 
   const existing = await getSettings()
   await setSettings({ ...DEFAULT_SETTINGS, ...existing })
 })
 
 chrome.runtime.onStartup.addListener(async () => {
-  console.log('[spanda] browser started')
+  console.log('[spandan] browser started')
   await restoreMusicTab()
 })
 
 // ---------------------------------------------------------------------------
-// Tab event listeners (event-driven audible detection)
+// Tab event listeners
 // ---------------------------------------------------------------------------
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   const state = await getState()
 
   if (isMusicTab(tabId, state.musicTab)) {
-    // If the music tab navigated away from YouTube, clear it.
     if (tab.url && !isYouTubeUrl(tab.url)) {
-      console.log('[spanda] music tab left YouTube, clearing')
+      console.log('[spandan] music tab left YouTube, clearing')
       await clearMusicTab()
       return
     }
 
-    // Keep stored metadata in sync when the music tab navigates between
-    // YouTube pages. This makes restart restoration more accurate.
     if (changeInfo.url && tab.url && state.musicTab) {
       await setState({
         musicTab: {
@@ -77,11 +78,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     }
   }
 
-  // Re-evaluate whenever a tab starts or stops producing audio.
-  if (changeInfo.audible !== undefined) {
-    console.log(
-      `[spanda] tab ${tabId} audible changed to ${changeInfo.audible}`,
-    )
+  // Polling is the primary mechanism for detecting audible changes.
+  // We still trigger an evaluation on navigation so SPA route changes are
+  // handled promptly.
+  if (changeInfo.url) {
     await evaluatePlayback()
   }
 })
@@ -90,7 +90,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   const state = await getState()
 
   if (isMusicTab(tabId, state.musicTab)) {
-    console.log('[spanda] music tab closed, clearing')
+    console.log('[spandan] music tab closed, clearing')
     await clearMusicTab()
   } else {
     await evaluatePlayback()
@@ -101,12 +101,27 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes.settings) return
 
   const newSettings = changes.settings.newValue as ExtensionSettings
+  const oldSettings = changes.settings.oldValue as ExtensionSettings | undefined
 
-  if (newSettings.enabled) {
-    evaluatePlayback().catch(() => {})
-  } else {
-    stopPolling()
+  if (!newSettings.enabled) {
+    stopAllAutomation()
+    return
   }
+
+  // If the resume delay changed while we were waiting to resume, restart the
+  // timer with the new value so the user sees the updated delay immediately.
+  if (
+    oldSettings &&
+    newSettings.resumeDelayMs !== oldSettings.resumeDelayMs
+  ) {
+    cancelResumeTimer()
+    setState({ waitingToResumeUntil: null })
+      .then(() => evaluatePlayback())
+      .catch(() => {})
+    return
+  }
+
+  evaluatePlayback().catch(() => {})
 })
 
 // ---------------------------------------------------------------------------
@@ -146,11 +161,24 @@ async function handleMessage(
     case 'CONTENT_READY': {
       const state = await getState()
       if (sender.tab?.id && isMusicTab(sender.tab.id, state.musicTab)) {
-        console.log('[spanda] music tab content script ready')
+        console.log('[spandan] music tab content script ready')
         await evaluatePlayback()
       }
       return { ok: true }
     }
+
+    case 'USER_PAUSED':
+    case 'USER_MUTED':
+    case 'USER_PLAYED':
+    case 'USER_UNMUTED':
+      // Legacy individual events are kept for compatibility but are now
+      // superseded by USER_STATE_CHANGED, which is debounced and carries the
+      // full aggregate state.
+      return { ok: true }
+
+    case 'USER_STATE_CHANGED':
+      await handleUserStateChanged(sender.tab?.id, message.payload)
+      return { ok: true }
 
     default:
       return { ok: false, payload: 'unknown message type' }
@@ -159,27 +187,14 @@ async function handleMessage(
 
 async function handleGetStatus(): Promise<ExtensionResponse> {
   const [settings, state] = await Promise.all([getSettings(), getState()])
-  const audibleTabs = await queryAudibleTabs()
-
-  const nonMusicAudibleTabs = audibleTabs.filter(
-    (tab) => tab.id !== undefined && !isMusicTab(tab.id, state.musicTab),
-  )
-
-  return {
-    ok: true,
-    payload: {
-      enabled: settings.enabled,
-      musicTab: state.musicTab,
-      isPlaying: state.isPlaying,
-      isNonMusicAudible: nonMusicAudibleTabs.length > 0,
-    },
-  }
+  const status = await getComputedStatus(settings, state)
+  return { ok: true, payload: status }
 }
 
 async function handleSetMusicTab(
   musicTab: MusicTab,
 ): Promise<ExtensionResponse> {
-  console.log('[spanda] set music tab request', musicTab)
+  console.log('[spandan] set music tab request', musicTab)
 
   if (!isYouTubeUrl(musicTab.url)) {
     return {
@@ -188,10 +203,57 @@ async function handleSetMusicTab(
     }
   }
 
-  await setState({ musicTab, isPlaying: false })
+  // Query the actual video state so we don't trigger an unwanted fade-in
+  // when the user selects a tab that is already playing.
+  const videoStatus = await queryVideoStatus(musicTab.tabId)
+  console.log('[spandan] initial video status for music tab', videoStatus)
+
+  await setState({
+    musicTab,
+    isPlaying: videoStatus.isPlaying,
+    manuallyPaused: !videoStatus.isPlaying && videoStatus.isMuted,
+    waitingToResumeUntil: null,
+  })
   await evaluatePlayback()
 
   return { ok: true, payload: musicTab }
+}
+
+async function handleUserStateChanged(
+  tabId: number | undefined,
+  status: VideoStatus,
+): Promise<void> {
+  if (!tabId) return
+  const state = await getState()
+  if (!isMusicTab(tabId, state.musicTab)) return
+
+  console.log('[spandan] USER_STATE_CHANGED received', status, {
+    previousManuallyPaused: state.manuallyPaused,
+  })
+
+  const userIsActivelyListening = status.isPlaying && !status.isMuted
+
+  if (userIsActivelyListening) {
+    if (state.manuallyPaused) {
+      console.log('[spandan] user resumed music, clearing manual pause')
+    }
+    // User resumed the music (play or unmute). Re-enable auto-management and
+    // let evaluatePlayback decide whether to fade out again immediately.
+    await setState({ manuallyPaused: false, isPlaying: true })
+    await evaluatePlayback()
+  } else {
+    if (!state.manuallyPaused) {
+      console.log('[spandan] user paused/muted music, suspending auto-management')
+    }
+    // User paused or muted the music. Suspend auto-management until they
+    // explicitly resume.
+    cancelResumeTimer()
+    await setState({
+      isPlaying: false,
+      manuallyPaused: true,
+      waitingToResumeUntil: null,
+    })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,8 +261,13 @@ async function handleSetMusicTab(
 // ---------------------------------------------------------------------------
 
 async function clearMusicTab(): Promise<void> {
-  await setState({ musicTab: null, isPlaying: false })
-  stopPolling()
+  stopAllAutomation()
+  await setState({
+    musicTab: null,
+    isPlaying: false,
+    manuallyPaused: false,
+    waitingToResumeUntil: null,
+  })
 }
 
 async function restoreMusicTab(): Promise<void> {
@@ -218,69 +285,167 @@ async function restoreMusicTab(): Promise<void> {
     })
     await evaluatePlayback()
   } else {
-    // The saved tab is no longer open; keep the metadata but clear the
-    // stale tab ID so the popup shows "No music tab selected".
-    console.log('[spanda] saved music tab not found on startup, clearing')
-    await setState({ musicTab: null })
+    console.log('[spandan] saved music tab not found on startup, clearing')
+    await clearMusicTab()
   }
 }
 
+function stopAllAutomation(): void {
+  cancelResumeTimer()
+  stopPolling()
+}
+
+// ---------------------------------------------------------------------------
+// Status computation
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Play/pause orchestration
 // ---------------------------------------------------------------------------
 
-const POLL_INTERVAL_MS = 2000
+const POLL_INTERVAL_MS = 1000
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
 async function evaluatePlayback(): Promise<void> {
   const [settings, state] = await Promise.all([getSettings(), getState()])
 
   if (!settings.enabled) {
-    console.log('[spanda] extension disabled, skipping evaluation')
-    stopPolling()
+    stopAllAutomation()
     return
   }
 
   if (!state.musicTab?.tabId) {
-    console.log('[spanda] no music tab, skipping evaluation')
-    stopPolling()
+    stopAllAutomation()
     return
   }
 
-  const audibleTabs = await queryAudibleTabs()
-  const nonMusicAudibleTabs = audibleTabs.filter(
-    (tab) => tab.id !== undefined && !isMusicTab(tab.id, state.musicTab),
+  const [audibleTabs, videoStatus] = await Promise.all([
+    queryAudibleTabs(),
+    queryVideoStatus(state.musicTab.tabId),
+  ])
+
+  const nonMusicAudibleTabs = getWhitelistedNonMusicTabs(
+    audibleTabs,
+    state.musicTab,
+    settings.whitelist,
   )
 
-  console.log('[spanda] audible tabs', {
-    all: audibleTabs.map((t) => ({ id: t.id, title: t.title })),
+  console.log('[spandan] evaluatePlayback', {
     nonMusic: nonMusicAudibleTabs.map((t) => ({ id: t.id, title: t.title })),
-    currentIsPlaying: state.isPlaying,
+    videoStatus,
+    cachedIsPlaying: state.isPlaying,
+    manuallyPaused: state.manuallyPaused,
+    waitingUntil: state.waitingToResumeUntil,
   })
 
-  // Always issue the command that matches the desired state. The commands are
-  // idempotent on the <video> element, so this is safe even if our stored
-  // `isPlaying` state is out of sync with reality.
-  const shouldPlay = nonMusicAudibleTabs.length === 0
-  await setDesiredPlayback(state.musicTab.tabId, shouldPlay)
+  if (nonMusicAudibleTabs.length > 0) {
+    await handleNonMusicPlaying(settings, state, videoStatus)
+  } else {
+    await handleSilence(settings, state, videoStatus)
+  }
 
-  // Keep polling active whenever a music tab is set. This ensures commands
-  // are retried if the content script wasn't ready, and it catches any
-  // audible transitions the event API misses.
   updatePolling(settings.enabled, state.musicTab)
 }
 
-async function setDesiredPlayback(
-  tabId: number,
-  shouldPlay: boolean,
+async function handleNonMusicPlaying(
+  settings: ExtensionSettings,
+  state: Awaited<ReturnType<typeof getState>>,
+  videoStatus: VideoStatus,
 ): Promise<void> {
-  const command = shouldPlay ? 'PLAY' : 'PAUSE'
-  console.log(`[spanda] sending ${command} to music tab`, tabId)
+  if (!state.musicTab?.tabId) return
 
-  const success = await sendCommand(tabId, command)
-  if (success) {
-    await setState({ isPlaying: shouldPlay })
+  // Cancel any pending resume and clear the waiting flag.
+  cancelResumeTimer()
+  if (state.waitingToResumeUntil) {
+    await setState({ waitingToResumeUntil: null })
   }
+
+  if (state.manuallyPaused) {
+    // Music is paused by the user; don't fight them.
+    return
+  }
+
+  // Always trust the actual video element over the cached state.
+  if (videoStatus.isPlaying) {
+    const ok = await sendCommand(state.musicTab.tabId, 'FADE_OUT_PAUSE', {
+      durationMs: settings.fadeDurationMs,
+    })
+    if (ok) {
+      await setState({ isPlaying: false })
+    }
+  }
+}
+
+async function handleSilence(
+  settings: ExtensionSettings,
+  state: Awaited<ReturnType<typeof getState>>,
+  videoStatus: VideoStatus,
+): Promise<void> {
+  if (!state.musicTab?.tabId) return
+
+  if (state.manuallyPaused) {
+    return
+  }
+
+  // If the video is already playing, nothing to do.
+  if (videoStatus.isPlaying) {
+    if (!state.isPlaying) {
+      await setState({ isPlaying: true })
+    }
+    return
+  }
+
+  // If we were waiting and the timer should have fired while the worker was
+  // away, resume immediately rather than starting a new delay.
+  if (state.waitingToResumeUntil) {
+    if (state.waitingToResumeUntil > Date.now()) {
+      return
+    }
+
+    console.log('[spandan] resume timer expired while worker was inactive')
+    await setState({ waitingToResumeUntil: null })
+    const ok = await sendCommand(state.musicTab.tabId, 'FADE_IN_PLAY', {
+      durationMs: settings.fadeDurationMs,
+    })
+    if (ok) {
+      await setState({ isPlaying: true })
+    }
+    return
+  }
+
+  // Start the resume delay timer.
+  const resumeAt = Date.now() + settings.resumeDelayMs
+  await setState({ waitingToResumeUntil: resumeAt })
+
+  scheduleResumeTimer(async () => {
+    await setState({ waitingToResumeUntil: null })
+
+    const currentSettings = await getSettings()
+    const currentState = await getState()
+
+    if (
+      !currentSettings.enabled ||
+      !currentState.musicTab?.tabId ||
+      currentState.manuallyPaused
+    ) {
+      return
+    }
+
+    const currentVideoStatus = await queryVideoStatus(currentState.musicTab.tabId)
+    if (!currentVideoStatus.isPlaying) {
+      const ok = await sendCommand(
+        currentState.musicTab.tabId,
+        'FADE_IN_PLAY',
+        {
+          durationMs: currentSettings.fadeDurationMs,
+        },
+      )
+      if (ok) {
+        await setState({ isPlaying: true })
+      }
+    }
+
+    await evaluatePlayback()
+  }, settings.resumeDelayMs)
 }
 
 function updatePolling(enabled: boolean, musicTab: MusicTab | null): void {
@@ -294,9 +459,7 @@ function updatePolling(enabled: boolean, musicTab: MusicTab | null): void {
 function startPolling(): void {
   if (pollTimer) return
   pollTimer = setInterval(() => {
-    evaluatePlayback().catch(() => {
-      // Silently ignore polling errors; the next event will recover.
-    })
+    evaluatePlayback().catch(() => {})
   }, POLL_INTERVAL_MS)
 }
 
@@ -307,61 +470,53 @@ function stopPolling(): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Messaging helpers
+// ---------------------------------------------------------------------------
+
 async function sendCommand(
   tabId: number,
-  command: 'PLAY' | 'PAUSE' | 'GET_VIDEO_STATUS',
+  command: 'PLAY' | 'PAUSE' | 'FADE_IN_PLAY' | 'FADE_OUT_PAUSE' | 'GET_VIDEO_STATUS',
+  payload?: unknown,
 ): Promise<boolean> {
-  console.log(`[spanda] sendCommand START ${command} -> tab ${tabId}`)
+  const message = payload === undefined
+    ? { type: command }
+    : { type: command, payload }
+
+  console.log(`[spandan] sendCommand START ${command} -> tab ${tabId}`, payload)
 
   try {
-    const response = (await chrome.tabs.sendMessage(tabId, {
-      type: command,
-    })) as ExtensionResponse
-
-    console.log(`[spanda] sendCommand RESPONSE ${command} -> tab ${tabId}:`, response)
+    const response = (await chrome.tabs.sendMessage(tabId, message)) as ExtensionResponse
+    console.log(`[spandan] sendCommand RESPONSE ${command} -> tab ${tabId}:`, response)
 
     if (response?.ok) {
-      console.log(`[spanda] ${command} succeeded on tab ${tabId}`)
+      console.log(`[spandan] ${command} succeeded on tab ${tabId}`)
       return true
     }
 
-    console.warn(
-      `[spanda] ${command} rejected on tab ${tabId}:`,
-      response?.payload,
-    )
+    console.warn(`[spandan] ${command} rejected on tab ${tabId}:`, response?.payload)
   } catch (error) {
-    console.warn(`[spanda] sendCommand ERROR ${command} -> tab ${tabId}:`, error)
+    console.warn(`[spandan] sendCommand ERROR ${command} -> tab ${tabId}:`, error)
   }
 
-  // Retry once after a short delay. This handles the common case where the
-  // content script hasn't finished injecting or the page is still loading.
-  console.log(`[spanda] sendCommand RETRY ${command} -> tab ${tabId} in 500ms`)
+  console.log(`[spandan] sendCommand RETRY ${command} -> tab ${tabId} in 500ms`)
   await delay(500)
 
   try {
-    const retryResponse = (await chrome.tabs.sendMessage(tabId, {
-      type: command,
-    })) as ExtensionResponse
-
-    console.log(`[spanda] sendCommand RETRY RESPONSE ${command} -> tab ${tabId}:`, retryResponse)
+    const retryResponse = (await chrome.tabs.sendMessage(tabId, message)) as ExtensionResponse
+    console.log(`[spandan] sendCommand RETRY RESPONSE ${command} -> tab ${tabId}:`, retryResponse)
 
     if (retryResponse?.ok) {
-      console.log(`[spanda] ${command} retry succeeded on tab ${tabId}`)
+      console.log(`[spandan] ${command} retry succeeded on tab ${tabId}`)
       return true
     }
 
-    console.warn(
-      `[spanda] ${command} retry rejected on tab ${tabId}:`,
-      retryResponse?.payload,
-    )
+    console.warn(`[spandan] ${command} retry rejected on tab ${tabId}:`, retryResponse?.payload)
   } catch (retryError) {
-    console.warn(
-      `[spanda] ${command} retry failed on tab ${tabId}`,
-      retryError,
-    )
+    console.warn(`[spandan] ${command} retry failed on tab ${tabId}`, retryError)
   }
 
-  console.log(`[spanda] sendCommand FAILED ${command} -> tab ${tabId}`)
+  console.log(`[spandan] sendCommand FAILED ${command} -> tab ${tabId}`)
   return false
 }
 

@@ -1,21 +1,27 @@
-import { use, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/Button'
 import { Toggle } from '@/components/ui/Toggle'
-import { DEFAULT_SETTINGS, getSettings, setSettings } from '@/lib/storage'
-import type { ExtensionResponse, ExtensionSettings, MusicTab } from '@/types'
+import { getComputedStatus } from '@/lib/status'
+import {
+  DEFAULT_SETTINGS,
+  getSettings,
+  getState,
+  setSettings,
+} from '@/lib/storage'
+import type {
+  ExtensionResponse,
+  ExtensionSettings,
+  MusicTab,
+  PlaybackStatus,
+  StatusPayload,
+} from '@/types'
 
-interface StatusPayload {
-  enabled: boolean
-  musicTab: MusicTab | null
-  isPlaying: boolean
-  isNonMusicAudible: boolean
-}
-
-interface InitialStatus {
+interface UiState {
   settings: ExtensionSettings
+  status: PlaybackStatus
+  reason: string
   musicTab: MusicTab | null
-  isPlaying: boolean
-  isNonMusicAudible: boolean
+  waitingSeconds: number | null
   error: string | null
 }
 
@@ -43,42 +49,30 @@ function sendMessageWithTimeout<T>(
   })
 }
 
-async function loadInitialStatus(): Promise<InitialStatus> {
+async function loadInitialStatus(): Promise<UiState> {
   try {
-    const [settings, response] = await Promise.race([
-      Promise.all([
-        getSettings(),
-        sendMessageWithTimeout<ExtensionResponse>({ type: 'GET_STATUS' }),
-      ]),
-      new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error('Extension worker timeout')),
-          WORKER_TIMEOUT_MS,
-        ),
-      ),
-    ])
-
-    const payload = response.ok ? (response.payload as StatusPayload) : null
+    const [settings, state] = await Promise.all([getSettings(), getState()])
+    const status = await getComputedStatus(settings, state)
 
     return {
       settings,
-      musicTab: payload?.musicTab ?? null,
-      isPlaying: payload?.isPlaying ?? false,
-      isNonMusicAudible: payload?.isNonMusicAudible ?? false,
+      status: status.status,
+      reason: status.reason,
+      musicTab: status.musicTab,
+      waitingSeconds: status.waitingSeconds,
       error: null,
     }
   } catch (error) {
-    console.error('[spanda] popup failed to load status', error)
+    console.error('[spandan] popup failed to load status', error)
 
-    // Even if the worker is unreachable, try to read settings from storage
-    // so the popup isn't completely blank.
     const settings = await getSettings().catch(() => DEFAULT_SETTINGS)
 
     return {
       settings,
+      status: 'no_music_tab',
+      reason: 'Extension worker is not responding',
       musicTab: null,
-      isPlaying: false,
-      isNonMusicAudible: false,
+      waitingSeconds: null,
       error:
         'Extension worker is not responding. Try reloading the extension from brave://extensions.',
     }
@@ -86,28 +80,48 @@ async function loadInitialStatus(): Promise<InitialStatus> {
 }
 
 /**
- * Popup UI for spanda.
+ * Popup UI for spandan.
  *
- * Displays the extension enabled state, the current music tab, and whether
- * playback is currently paused by another audible tab. The popup communicates
- * with the background service worker so the status is always live.
+ * Displays the extension enabled state, the current music tab, and a rich
+ * status indicator with the reason for the current playback state.
  */
 function Popup() {
-  // Create a fresh promise on every popup mount. A 2-second timeout prevents
-  // the popup from getting stuck if the background service worker is slow or
-  // unresponsive.
-  const initial = use(useState(() => loadInitialStatus())[0])
+  const [uiState, setUiState] = useState<UiState | null>(null)
 
-  const [enabled, setEnabled] = useState(initial.settings.enabled)
-  const [musicTab, setMusicTab] = useState<MusicTab | null>(initial.musicTab)
-  const [isPlaying, setIsPlaying] = useState(initial.isPlaying)
-  const [isNonMusicAudible, setIsNonMusicAudible] = useState(
-    initial.isNonMusicAudible,
-  )
-  const [error, setError] = useState<string | null>(initial.error)
+  useEffect(() => {
+    let cancelled = false
+    loadInitialStatus().then((state) => {
+      if (!cancelled) setUiState(state)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Live countdown when waiting to resume.
+  useEffect(() => {
+    if (uiState?.status !== 'waiting' || uiState.waitingSeconds === null)
+      return
+
+    const interval = setInterval(() => {
+      setUiState((current) => {
+        if (!current || current.waitingSeconds === null || current.waitingSeconds <= 1) {
+          clearInterval(interval)
+          refreshStatus()
+          return current
+        }
+        return {
+          ...current,
+          waitingSeconds: current.waitingSeconds - 1,
+        }
+      })
+    }, 1000)
+
+    return () => clearInterval(interval)
+  }, [uiState?.status, uiState?.waitingSeconds])
 
   async function refreshStatus() {
-    setError(null)
+    setUiState((current) => (current ? { ...current, error: null } : current))
 
     try {
       const response = await sendMessageWithTimeout<ExtensionResponse>({
@@ -116,31 +130,57 @@ function Popup() {
 
       if (response.ok && response.payload) {
         const payload = response.payload as StatusPayload
-        setMusicTab(payload.musicTab)
-        setIsPlaying(payload.isPlaying)
-        setIsNonMusicAudible(payload.isNonMusicAudible)
+        setUiState((current) =>
+          current
+            ? {
+                ...current,
+                status: payload.status,
+                reason: payload.reason,
+                musicTab: payload.musicTab,
+                waitingSeconds: payload.waitingSeconds,
+                error: null,
+              }
+            : current,
+        )
       }
     } catch (err) {
-      console.error('[spanda] popup refresh failed', err)
-      setError(
-        'Extension worker is not responding. Try reloading the extension.',
+      console.error('[spandan] popup refresh failed', err)
+      setUiState((current) =>
+        current
+          ? {
+              ...current,
+              error:
+                'Extension worker is not responding. Try reloading the extension.',
+            }
+          : current,
       )
     }
   }
 
   const handleToggle = async (next: boolean) => {
-    setEnabled(next)
-    setError(null)
+    setUiState((current) =>
+      current
+        ? {
+            ...current,
+            settings: { ...current.settings, enabled: next },
+            error: null,
+          }
+        : current,
+    )
     await setSettings({ enabled: next })
     await refreshStatus()
   }
 
   const handleSetMusicTab = async () => {
-    setError(null)
+    setUiState((current) => (current ? { ...current, error: null } : current))
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
 
     if (!tab?.id || !tab.url) {
-      setError('Could not identify the current tab.')
+      setUiState((current) =>
+        current
+          ? { ...current, error: 'Could not identify the current tab.' }
+          : current,
+      )
       return
     }
 
@@ -155,55 +195,96 @@ function Popup() {
       })
 
       if (!response.ok) {
-        setError(String(response.payload ?? 'Failed to set music tab.'))
+        setUiState((current) =>
+          current
+            ? {
+                ...current,
+                error: String(response.payload ?? 'Failed to set music tab.'),
+              }
+            : current,
+        )
       } else {
         await refreshStatus()
       }
     } catch (err) {
-      console.error('[spanda] set music tab failed', err)
-      setError(
-        'Extension worker is not responding. Try reloading the extension.',
+      console.error('[spandan] set music tab failed', err)
+      setUiState((current) =>
+        current
+          ? {
+              ...current,
+              error:
+                'Extension worker is not responding. Try reloading the extension.',
+            }
+          : current,
       )
     }
   }
 
-  const renderStatus = () => {
-    if (!musicTab) return 'No music tab selected'
-    if (isNonMusicAudible) return 'Paused — another tab is playing audio'
-    return isPlaying ? 'Playing' : 'Paused'
+  const renderStatusLabel = (status: PlaybackStatus): string => {
+    switch (status) {
+      case 'disabled':
+        return 'Extension disabled'
+      case 'no_music_tab':
+        return 'No music tab selected'
+      case 'playing':
+        return 'Music playing'
+      case 'paused':
+        return 'Music paused'
+      case 'waiting':
+        return 'Waiting to resume'
+      case 'manual_pause':
+        return 'Auto-management paused'
+      default:
+        return 'Unknown'
+    }
+  }
+
+  if (!uiState) {
+    return (
+      <div className="flex h-40 w-80 items-center justify-center bg-slate-950 p-4 text-white">
+        <p className="text-sm text-slate-400">Loading spandan...</p>
+      </div>
+    )
   }
 
   return (
     <div className="w-80 space-y-4 bg-slate-950 p-4 text-white">
       <header>
-        <h1 className="text-lg font-bold text-cyan-300">spanda</h1>
+        <h1 className="text-lg font-bold text-cyan-300">spandan</h1>
         <p className="text-xs text-slate-400">a background music extension</p>
       </header>
 
-      {error ? (
+      {uiState.error ? (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
-          <p className="text-sm text-red-300">{error}</p>
+          <p className="text-sm text-red-300">{uiState.error}</p>
         </div>
       ) : (
         <div className="rounded-lg border border-white/10 bg-white/5 p-3">
           <p className="text-sm">
-            Status:{' '}
-            <span className="font-medium text-cyan-200">{renderStatus()}</span>
+            <span className="font-medium text-cyan-200">
+              {renderStatusLabel(uiState.status)}
+            </span>
           </p>
-          {musicTab && (
+          <p className="mt-1 text-xs text-slate-400">{uiState.reason}</p>
+          {uiState.status === 'waiting' && uiState.waitingSeconds !== null && (
+            <p className="mt-1 text-xs text-cyan-300">
+              Resuming in {uiState.waitingSeconds}s
+            </p>
+          )}
+          {uiState.musicTab && (
             <p
-              className="mt-1 truncate text-xs text-slate-400"
-              title={musicTab.url}
+              className="mt-2 truncate text-xs text-slate-500"
+              title={uiState.musicTab.url}
             >
-              {musicTab.title}
+              {uiState.musicTab.title}
             </p>
           )}
         </div>
       )}
 
       <Toggle
-        label={enabled ? 'Enabled' : 'Disabled'}
-        checked={enabled}
+        label={uiState.settings.enabled ? 'Enabled' : 'Disabled'}
+        checked={uiState.settings.enabled}
         onChange={handleToggle}
       />
 

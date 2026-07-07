@@ -25,6 +25,8 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
 export const DEFAULT_STATE: ExtensionState = {
   musicTab: null,
   isPlaying: false,
+  manuallyPaused: false,
+  waitingToResumeUntil: null,
 }
 
 /**
