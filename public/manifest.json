@@ -16,9 +16,19 @@
     "service_worker": "assets/background.js",
     "type": "module"
   },
+  "icons": {
+    "16": "icon_16.png",
+    "32": "icon_32.png",
+    "48": "icon_48.png",
+    "128": "icon_128.png"
+  },
   "action": {
     "default_popup": "popup/index.html",
-    "default_title": "spandan"
+    "default_title": "Spandan",
+    "default_icon": {
+      "16": "icon_16.png",
+      "32": "icon_32.png"
+    }
   },
   "options_page": "options/index.html",
   "content_scripts": [

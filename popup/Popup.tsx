@@ -1,5 +1,14 @@
 import { useEffect, useState } from 'react'
+import {
+  Headphones,
+  Music2,
+  Settings,
+  Volume2,
+} from 'lucide-react'
 import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
+import { Logo } from '@/components/ui/Logo'
+import { StatusBadge } from '@/components/ui/StatusBadge'
 import { Toggle } from '@/components/ui/Toggle'
 import { getComputedStatus } from '@/lib/status'
 import {
@@ -79,13 +88,40 @@ async function loadInitialStatus(): Promise<UiState> {
   }
 }
 
-/**
- * Popup UI for spandan.
- *
- * Displays the extension enabled state, the current music tab, and a rich
- * status indicator with the reason for the current playback state.
- */
-function Popup() {
+function statusLabel(status: PlaybackStatus): string {
+  switch (status) {
+    case 'disabled':
+      return 'Extension disabled'
+    case 'no_music_tab':
+      return 'No music tab'
+    case 'playing':
+      return 'Music playing'
+    case 'paused':
+      return 'Music paused'
+    case 'waiting':
+      return 'Waiting to resume'
+    case 'manual_pause':
+      return 'Auto-pause off'
+    default:
+      return 'Unknown'
+  }
+}
+
+function statusIcon(status: PlaybackStatus) {
+  switch (status) {
+    case 'playing':
+      return <Music2 size={18} className="text-emerald-300" />
+    case 'waiting':
+      return <Volume2 size={18} className="text-amber-300" />
+    case 'paused':
+    case 'manual_pause':
+      return <Headphones size={18} className="text-slate-400" />
+    default:
+      return <Logo size={18} />
+  }
+}
+
+export default function Popup() {
   const [uiState, setUiState] = useState<UiState | null>(null)
 
   useEffect(() => {
@@ -98,14 +134,17 @@ function Popup() {
     }
   }, [])
 
-  // Live countdown when waiting to resume.
   useEffect(() => {
     if (uiState?.status !== 'waiting' || uiState.waitingSeconds === null)
       return
 
     const interval = setInterval(() => {
       setUiState((current) => {
-        if (!current || current.waitingSeconds === null || current.waitingSeconds <= 1) {
+        if (
+          !current ||
+          current.waitingSeconds === null ||
+          current.waitingSeconds <= 1
+        ) {
           clearInterval(interval)
           refreshStatus()
           return current
@@ -220,87 +259,103 @@ function Popup() {
     }
   }
 
-  const renderStatusLabel = (status: PlaybackStatus): string => {
-    switch (status) {
-      case 'disabled':
-        return 'Extension disabled'
-      case 'no_music_tab':
-        return 'No music tab selected'
-      case 'playing':
-        return 'Music playing'
-      case 'paused':
-        return 'Music paused'
-      case 'waiting':
-        return 'Waiting to resume'
-      case 'manual_pause':
-        return 'Auto-management paused'
-      default:
-        return 'Unknown'
-    }
-  }
-
   if (!uiState) {
     return (
-      <div className="flex h-40 w-80 items-center justify-center bg-slate-950 p-4 text-white">
-        <p className="text-sm text-slate-400">Loading spandan...</p>
+      <div className="flex h-44 w-80 items-center justify-center bg-[var(--spandan-bg)] p-4 text-white">
+        <Logo size={28} className="animate-pulse-soft" />
       </div>
     )
   }
 
+  const label = statusLabel(uiState.status)
+
   return (
-    <div className="w-80 space-y-4 bg-slate-950 p-4 text-white">
-      <header>
-        <h1 className="text-lg font-bold text-cyan-300">spandan</h1>
-        <p className="text-xs text-slate-400">a background music extension</p>
+    <div className="w-80 animate-fade-in bg-[var(--spandan-bg)] p-4 text-white">
+      <header className="mb-4 flex items-center gap-3">
+        <Logo size={28} />
+        <div>
+          <h1 className="text-base font-bold leading-tight tracking-tight text-white">
+            Spandan
+          </h1>
+          <p className="text-[11px] leading-tight text-slate-500">
+            Adaptive music for deep focus
+          </p>
+        </div>
       </header>
 
       {uiState.error ? (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
-          <p className="text-sm text-red-300">{uiState.error}</p>
-        </div>
+        <Card className="mb-4 border-rose-500/20 bg-rose-500/10">
+          <p className="text-sm text-rose-300">{uiState.error}</p>
+        </Card>
       ) : (
-        <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-          <p className="text-sm">
-            <span className="font-medium text-cyan-200">
-              {renderStatusLabel(uiState.status)}
-            </span>
-          </p>
-          <p className="mt-1 text-xs text-slate-400">{uiState.reason}</p>
+        <Card variant="glass" className="mb-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2">
+              {statusIcon(uiState.status)}
+              <StatusBadge status={uiState.status} label={label} />
+            </div>
+          </div>
+
+          <p className="mt-2 text-sm text-slate-300">{uiState.reason}</p>
+
           {uiState.status === 'waiting' && uiState.waitingSeconds !== null && (
-            <p className="mt-1 text-xs text-cyan-300">
-              Resuming in {uiState.waitingSeconds}s
-            </p>
+            <div className="mt-3">
+              <div className="mb-1.5 flex items-center justify-between text-xs text-slate-400">
+                <span>Resuming</span>
+                <span className="font-medium text-amber-300">
+                  {uiState.waitingSeconds}s
+                </span>
+              </div>
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-700/60">
+                <div
+                  className="h-full rounded-full bg-amber-400 transition-all duration-1000 ease-linear"
+                  style={{
+                    width: `${Math.max(
+                      5,
+                      (uiState.waitingSeconds / (uiState.settings.resumeDelayMs / 1000)) * 100,
+                    )}%`,
+                  }}
+                />
+              </div>
+            </div>
           )}
+
           {uiState.musicTab && (
-            <p
-              className="mt-2 truncate text-xs text-slate-500"
-              title={uiState.musicTab.url}
-            >
-              {uiState.musicTab.title}
-            </p>
+            <div className="mt-3 flex items-center gap-2 rounded-[var(--spandan-radius-sm)] bg-white/[0.03] px-2.5 py-2">
+              <Music2 size={14} className="shrink-0 text-slate-500" />
+              <p
+                className="truncate text-xs text-slate-400"
+                title={uiState.musicTab.url}
+              >
+                {uiState.musicTab.title}
+              </p>
+            </div>
           )}
-        </div>
+        </Card>
       )}
 
-      <Toggle
-        label={uiState.settings.enabled ? 'Enabled' : 'Disabled'}
-        checked={uiState.settings.enabled}
-        onChange={handleToggle}
-      />
+      <Card className="mb-3">
+        <Toggle
+          label="Enable Spandan"
+          description="Automatically manage background music"
+          checked={uiState.settings.enabled}
+          onChange={handleToggle}
+        />
+      </Card>
 
       <Button className="w-full" onClick={handleSetMusicTab}>
+        <Music2 size={16} />
         Set Current Tab as Music Tab
       </Button>
 
       <button
         type="button"
         onClick={() => chrome.runtime.openOptionsPage()}
-        className="block w-full text-center text-xs text-slate-400 hover:text-cyan-300"
+        className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-[var(--spandan-radius-sm)] py-2 text-xs font-medium text-slate-500 transition-colors hover:text-cyan-300"
       >
+        <Settings size={13} />
         Open Settings
       </button>
     </div>
   )
 }
-
-export default Popup
