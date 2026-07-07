@@ -18,7 +18,7 @@ Spandan is a calm, minimal browser extension that intelligently pauses and resum
 
 ---
 
-## Screenshots
+<!-- ## Screenshots
 
 <div align="center">
 
@@ -35,7 +35,19 @@ Spandan is a calm, minimal browser extension that intelligently pauses and resum
     </figure>
   </div>
 
+</div> -->
+
+## Screenshots
+
+<div align="center">
+
+<p><em>Spandan keeps your focus flow uninterrupted.</em></p>
+
+<img src="docs/popup.png" alt="Popup" width="320">
+<img src="docs/settings.png" alt="Settings" width="320">
+
 </div>
+
 
 ---
 
